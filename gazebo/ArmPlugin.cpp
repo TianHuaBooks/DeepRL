@@ -6,6 +6,7 @@
 
 #include "ArmPlugin.h"
 #include "PropPlugin.h"
+#include "dqnAgent.h"
 
 #include "cudaMappedMemory.h"
 #include "cudaPlanar.h"
@@ -28,31 +29,30 @@
 #define GAMMA 0.9f
 #define EPS_START 0.9f
 #define EPS_END 0.05f
-#define EPS_DECAY 200
+#define EPS_DECAY 100
 
 /*
 / TODO - Tune the following hyperparameters
 /
 */
 
-#define INPUT_WIDTH   512
-#define INPUT_HEIGHT  512
-#define OPTIMIZER "RMSprop"
+#define INPUT_WIDTH   64
+#define INPUT_HEIGHT  64
+#define OPTIMIZER "Adam"
 #define LEARNING_RATE 0.001f
-#define REPLAY_MEMORY 10000
-#define BATCH_SIZE 64
+#define REPLAY_MEMORY 40000
+#define BATCH_SIZE 256
 #define USE_LSTM true
-#define LSTM_SIZE 256
+#define LSTM_SIZE 512
 
 /*
 / TODO - Define Reward Parameters
 /
 */
 
-#define REWARD_WIN  10.0f
-#define REWARD_LOSS -10.0f
-#define REWARD_INTERIM 4.0f
-#define ALPHA 0.5
+#define REWARD_WIN  1.0
+#define REWARD_LOSS -1.0
+#define ALPHA 0.8f
 
 // Define Object Names
 #define WORLD_NAME "arm_world"
@@ -77,7 +77,6 @@
 int dbgCount = 0;
 
 namespace gazebo
-#define ALPHA 0.5
 {
  
 // register this plugin with the simulator
@@ -172,7 +171,7 @@ bool ArmPlugin::createAgent()
 	/
 	*/
 	
-	agent = dqnAgent::Create(INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS, 2, OPTIMIZER, LEARNING_RATE, REPLAY_MEMORY, BATCH_SIZE, GAMMA, EPS_START, EPS_END, EPS_DECAY, USE_LSTM, ALLOW_RANDOM, DEBUG_DQN);
+	agent = dqnAgent::Create(INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS, DOF*2, OPTIMIZER, LEARNING_RATE, REPLAY_MEMORY, BATCH_SIZE, GAMMA, EPS_START, EPS_END, EPS_DECAY, USE_LSTM, LSTM_SIZE, ALLOW_RANDOM, DEBUG_DQN);
 
 	if( !agent )
 	{
@@ -268,20 +267,31 @@ void ArmPlugin::onCollisionMsg(ConstContactsPtr &contacts)
 		/
 		*/
 		
-		bool collisionCheck = (strcmp(contacts->contact(i).collision1().c_str(), COLLISION_ITEM) == 0) ||
-			     (strcmp(contacts->contact(i).collision2().c_str(), COLLISION_ITEM) == 0);
+		bool collisionCheck = (strcmp(contacts->contact(i).collision1().c_str(), COLLISION_ITEM) == 0);
 
 		
 		if (collisionCheck)
 		{
-			rewardHistory = REWARD_WIN;
+			if (strcmp(contacts->contact(i).collision2().c_str(), COLLISION_POINT) == 0)
+				rewardHistory = REWARD_WIN * 20;
+			else {
+				rewardHistory = REWARD_LOSS * 5;
+				/*if(DEBUG)*/ {
+				   std::cout << "Collision 2:" << contacts->contact(i).collision2() << std::endl;
+				}
+			}
 
 			newReward  = true;
 			endEpisode = true;
 
 			return;
+		} else {
+		 /*if(DEBUG)*/ {std::cout << "Collision between[" << contacts->contact(i).collision1()
+			     << "] and [" << contacts->contact(i).collision2() << "]\n";}
+			rewardHistory = REWARD_LOSS * 5;
+			newReward  = true;
+			endEpisode = true;
 		}
-		
 	}
 }
 
@@ -585,23 +595,22 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 
 		// get the bounding box for the gripper		
 		const math::Box& gripBBox = gripper->GetBoundingBox();
-		const float groundContact = 0.05f;
+		const float groundContact = 0.02f;
 		
 		/*
 		/ TODO - set appropriate Reward for robot hitting the ground.
 		/
 		*/
-		const float distGoal = BoxDistance(gripBBox, propBBox); // compute the reward from distance to the goal
 		bool checkGroundContact = false;
-		if (distGoal < groundContact)
+		if (gripBBox.min.z < groundContact)
 		    checkGroundContact = true;
 		
 		if (checkGroundContact)
 		{
 						
-			if(DEBUG){printf("GROUND CONTACT, EOE\n");}
+			/*if(DEBUG)*/{printf("GROUND CONTACT, EOE\n");}
 
-			rewardHistory = REWARD_WIN;
+			rewardHistory = REWARD_LOSS * 10;
 			newReward     = true;
 			endEpisode    = true;
 		}
@@ -613,6 +622,7 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 		
 		if (!checkGroundContact)
 		{
+		        const float distGoal = BoxDistance(gripBBox, propBBox); // compute the reward from distance to the goal
 			if (DEBUG) {printf("distance('%s', '%s') = %f\n", gripper->GetName().c_str(), prop->model->GetName().c_str(), distGoal);}
 
 			
@@ -621,14 +631,19 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 				const float distDelta  = lastGoalDistance - distGoal;
 
 				// compute the smoothed moving average of the delta of the distance to the goal
-				avgGoalDelta  = avgGoalDelta * ALPHA + distDelta * (1.0 - ALPHA);
-				if (avgGoalDelta >= 0)
-					rewardHistory = (1.0 - avgGoalDelta) * REWARD_WIN;
-				else
-					rewardHistory = avgGoalDelta * REWARD_WIN;
+				avgGoalDelta  = (avgGoalDelta * ALPHA) + distDelta * (1.0f - ALPHA);
+				if (avgGoalDelta > 0)
+					rewardHistory = REWARD_WIN;
+				else 
+					rewardHistory = distGoal * REWARD_LOSS;
+
+				// penalize no move
+				if (fabs(distDelta) < 0.0001f)
+					rewardHistory += REWARD_LOSS;
+					
 				newReward     = true;	
 				//if ((++dbgCount % 3) == 0)
-				//    printf("avgGoalDelta:%f, rewardHistory:%f\n", avgGoalDelta, rewardHistory);
+				//    printf("avg:%f, delta:%f, dist:%f, reward:%f\n", avgGoalDelta, distDelta, distGoal, rewardHistory);
 			}
 
 			lastGoalDistance = distGoal;
