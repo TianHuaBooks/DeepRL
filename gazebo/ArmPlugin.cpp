@@ -28,8 +28,8 @@
 #define DEBUG_DQN false
 #define GAMMA 0.9f
 #define EPS_START 0.9f
-#define EPS_END 0.05f
-#define EPS_DECAY 100
+#define EPS_END 0.01f
+#define EPS_DECAY 200
 
 /*
 / TODO - Tune the following hyperparameters
@@ -38,21 +38,24 @@
 
 #define INPUT_WIDTH   64
 #define INPUT_HEIGHT  64
-#define OPTIMIZER "Adam"
-#define LEARNING_RATE 0.001f
-#define REPLAY_MEMORY 40000
-#define BATCH_SIZE 256
+#define OPTIMIZER "RMSprop"
+#define LEARNING_RATE 0.01f
+#define REPLAY_MEMORY 10000
+#define BATCH_SIZE 128
 #define USE_LSTM true
-#define LSTM_SIZE 512
+#define LSTM_SIZE 256
 
 /*
 / TODO - Define Reward Parameters
 /
 */
 
-#define REWARD_WIN  1.0
-#define REWARD_LOSS -1.0
-#define ALPHA 0.8f
+#define REWARD_WIN     1.0
+#define REWARD_LOSS   -1.0
+#define REWARD_MULT    100.0
+#define REWARD_FRAMES  10.0
+#define REWARD_GRND    40.0
+#define ALPHA          0.5f
 
 // Define Object Names
 #define WORLD_NAME "arm_world"
@@ -63,6 +66,9 @@
 #define COLLISION_FILTER "ground_plane::link::collision"
 #define COLLISION_ITEM   "tube::tube_link::tube_collision"
 #define COLLISION_POINT  "arm::gripperbase::gripper_link"
+#define RIGHT_GRIPPER    "arm::gripperbase::right_gripper"
+#define LEFT_GRIPPER     "arm::gripperbase::left_gripper"
+#define MID_GRIPPER      "arm::gripperbase::middle_collision"
 
 // Animation Steps
 #define ANIMATION_STEPS 1000
@@ -261,36 +267,36 @@ void ArmPlugin::onCollisionMsg(ConstContactsPtr &contacts)
 		if(DEBUG) {std::cout << "Collision between[" << contacts->contact(i).collision1()
 			     << "] and [" << contacts->contact(i).collision2() << "]\n";}
 
-	
 		/*
-		/ TODO - Check if there is collision between the arm and object, then issue learning reward
+		/  Check if there is collision between the arm and object, then issue learning reward
 		/
 		*/
-		
-		bool collisionCheck = (strcmp(contacts->contact(i).collision1().c_str(), COLLISION_ITEM) == 0);
-
-		
-		if (collisionCheck)
-		{
-			if (strcmp(contacts->contact(i).collision2().c_str(), COLLISION_POINT) == 0)
-				rewardHistory = REWARD_WIN * 20;
-			else {
-				rewardHistory = REWARD_LOSS * 5;
-				/*if(DEBUG)*/ {
-				   std::cout << "Collision 2:" << contacts->contact(i).collision2() << std::endl;
-				}
+		bool collisionCheck1 = (strcmp(contacts->contact(i).collision1().c_str(), COLLISION_ITEM) == 0);
+		bool collisionCheck2 = (strcmp(contacts->contact(i).collision2().c_str(), COLLISION_ITEM) == 0);
+		if (collisionCheck1 || collisionCheck2 ) {
+			if ((collisionCheck1 && (
+			 	(strcmp(contacts->contact(i).collision2().c_str(), COLLISION_POINT) == 0) ||
+			 	(strcmp(contacts->contact(i).collision2().c_str(), LEFT_GRIPPER) == 0) ||
+			 	(strcmp(contacts->contact(i).collision2().c_str(), RIGHT_GRIPPER) == 0) ||
+			 	(strcmp(contacts->contact(i).collision2().c_str(), MID_GRIPPER) == 0) )) ||
+		    	    (collisionCheck2 && (
+			 	(strcmp(contacts->contact(i).collision1().c_str(), COLLISION_POINT) == 0) ||
+			 	(strcmp(contacts->contact(i).collision1().c_str(), LEFT_GRIPPER) == 0) ||
+			 	(strcmp(contacts->contact(i).collision1().c_str(), RIGHT_GRIPPER) == 0) ||
+			 	(strcmp(contacts->contact(i).collision1().c_str(), MID_GRIPPER) == 0) ))) {
+					// give a big reward, also favors early frame
+					rewardHistory = REWARD_WIN * REWARD_MULT + 
+							(maxEpisodeLength - episodeFrames) * REWARD_FRAMES;
+					newReward  = true;
+					endEpisode = true;
+					return;
+			} else {
+				// collision not on grippers
+				rewardHistory = REWARD_LOSS * REWARD_FRAMES;
+				newReward  = true;
+				endEpisode = true;
+				// not to return as there might be some contact with grippers
 			}
-
-			newReward  = true;
-			endEpisode = true;
-
-			return;
-		} else {
-		 /*if(DEBUG)*/ {std::cout << "Collision between[" << contacts->contact(i).collision1()
-			     << "] and [" << contacts->contact(i).collision2() << "]\n";}
-			rewardHistory = REWARD_LOSS * 5;
-			newReward  = true;
-			endEpisode = true;
 		}
 	}
 }
@@ -610,7 +616,7 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 						
 			/*if(DEBUG)*/{printf("GROUND CONTACT, EOE\n");}
 
-			rewardHistory = REWARD_LOSS * 10;
+			rewardHistory = REWARD_LOSS * REWARD_GRND;
 			newReward     = true;
 			endEpisode    = true;
 		}
@@ -632,14 +638,11 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 
 				// compute the smoothed moving average of the delta of the distance to the goal
 				avgGoalDelta  = (avgGoalDelta * ALPHA) + distDelta * (1.0f - ALPHA);
-				if (avgGoalDelta > 0)
-					rewardHistory = REWARD_WIN;
-				else 
+				if (distDelta > 0)
+					rewardHistory = distDelta * REWARD_WIN;
+				else if (distDelta < 0)
 					rewardHistory = distGoal * REWARD_LOSS;
 
-				// penalize no move
-				if (fabs(distDelta) < 0.0001f)
-					rewardHistory += REWARD_LOSS;
 					
 				newReward     = true;	
 				//if ((++dbgCount % 3) == 0)
