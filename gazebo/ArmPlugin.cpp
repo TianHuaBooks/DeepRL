@@ -32,29 +32,28 @@
 #define EPS_DECAY 200
 
 /*
-/ TODO - Tune the following hyperparameters
-/
+/*  Tune the following hyperparameters
 */
-
+// To execute task 1 or task 2
+#define TASK1 	      false
 #define INPUT_WIDTH   64
 #define INPUT_HEIGHT  64
-#define OPTIMIZER "RMSprop"
+#define OPTIMIZER     "RMSprop"
 #define LEARNING_RATE 0.01f
 #define REPLAY_MEMORY 10000
-#define BATCH_SIZE 128
-#define USE_LSTM true
-#define LSTM_SIZE 256
+#define BATCH_SIZE    128
+#define USE_LSTM      true
+#define LSTM_SIZE     256
 
 /*
-/ TODO - Define Reward Parameters
-/
+/*  Define Reward Parameters
 */
 
-#define REWARD_WIN     1.0
-#define REWARD_LOSS   -1.0
-#define REWARD_MULT    100.0
-#define REWARD_FRAMES  10.0
-#define REWARD_GRND    40.0
+#define REWARD_WIN     1.0	// base winning award
+#define REWARD_LOSS   -1.0	// base loss penalty
+#define REWARD_MULT    100.0	// hitting goal
+#define REWARD_FRAMES  10.0	// faster award
+#define REWARD_GRND    40.0	// for hitting round
 #define ALPHA          0.5f
 
 // Define Object Names
@@ -81,6 +80,11 @@
 
 // debug
 int dbgCount = 0;
+
+// utility to check pattern string
+bool sameAsPattern(const std::string& str, const char* pattern);
+// utility to check whether contact hitting gripper 
+bool hasGripperHit(const std::string& contactPoint);
 
 namespace gazebo
 {
@@ -144,8 +148,8 @@ void ArmPlugin::Load(physics::ModelPtr _parent, sdf::ElementPtr /*_sdf*/)
 	cameraNode->Init();
 	
 	/*
-	/ TODO - Subscribe to camera topic
-	/
+	/* Subscribe to camera topic
+	/*
 	*/
 	
 	cameraSub = cameraNode->Subscribe("/gazebo/arm_world/camera/link/camera/image", &ArmPlugin::onCameraMsg, this);
@@ -154,8 +158,7 @@ void ArmPlugin::Load(physics::ModelPtr _parent, sdf::ElementPtr /*_sdf*/)
 	collisionNode->Init();
 		
 	/*
-	/ TODO - Subscribe to prop collision topic
-	/
+	/*  Subscribe to prop collision topic
 	*/
 	
 	collisionSub = collisionNode->Subscribe("/gazebo/arm_world/tube/tube_link/my_contact", &ArmPlugin::onCollisionMsg, this);
@@ -173,8 +176,7 @@ bool ArmPlugin::createAgent()
 
 			
 	/*
-	/ TODO - Create DQN Agent
-	/
+	/*  Create DQN Agent
 	*/
 	
 	agent = dqnAgent::Create(INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS, DOF*2, OPTIMIZER, LEARNING_RATE, REPLAY_MEMORY, BATCH_SIZE, GAMMA, EPS_START, EPS_END, EPS_DECAY, USE_LSTM, LSTM_SIZE, ALLOW_RANDOM, DEBUG_DQN);
@@ -247,9 +249,22 @@ void ArmPlugin::onCameraMsg(ConstImageStampedPtr &_msg)
 	newState = true;
 
 	if(DEBUG){printf("camera %i x %i  %i bpp  %i bytes\n", width, height, bpp, size);}
-
 }
 
+// utility to compare std::string the same as a pattern
+bool sameAsPattern(const std::string& str, const char* pattern) 
+{
+	return ( strcmp(str.c_str(), pattern) == 0 );
+}
+
+// utility to check whether contact hitting gripper 
+bool hasGripperHit(const std::string& contactPoint)
+{
+	return sameAsPattern(contactPoint, COLLISION_POINT) ||
+		sameAsPattern(contactPoint, LEFT_GRIPPER)   ||
+	 	sameAsPattern(contactPoint, RIGHT_GRIPPER)  ||
+		sameAsPattern(contactPoint, MID_GRIPPER);
+}
 
 // onCollisionMsg
 void ArmPlugin::onCollisionMsg(ConstContactsPtr &contacts)
@@ -261,7 +276,7 @@ void ArmPlugin::onCollisionMsg(ConstContactsPtr &contacts)
 
 	for (unsigned int i = 0; i < contacts->contact_size(); ++i)
 	{
-		if( strcmp(contacts->contact(i).collision2().c_str(), COLLISION_FILTER) == 0 )
+		if( sameAsPattern(contacts->contact(i).collision2(), COLLISION_FILTER) )
 			continue;
 
 		if(DEBUG) {std::cout << "Collision between[" << contacts->contact(i).collision1()
@@ -269,21 +284,20 @@ void ArmPlugin::onCollisionMsg(ConstContactsPtr &contacts)
 
 		/*
 		/  Check if there is collision between the arm and object, then issue learning reward
-		/
 		*/
-		bool collisionCheck1 = (strcmp(contacts->contact(i).collision1().c_str(), COLLISION_ITEM) == 0);
-		bool collisionCheck2 = (strcmp(contacts->contact(i).collision2().c_str(), COLLISION_ITEM) == 0);
+		bool collisionCheck1 = sameAsPattern(contacts->contact(i).collision1(), COLLISION_ITEM);
+		bool collisionCheck2 = sameAsPattern(contacts->contact(i).collision2(), COLLISION_ITEM);
 		if (collisionCheck1 || collisionCheck2 ) {
-			if ((collisionCheck1 && (
-			 	(strcmp(contacts->contact(i).collision2().c_str(), COLLISION_POINT) == 0) ||
-			 	(strcmp(contacts->contact(i).collision2().c_str(), LEFT_GRIPPER) == 0) ||
-			 	(strcmp(contacts->contact(i).collision2().c_str(), RIGHT_GRIPPER) == 0) ||
-			 	(strcmp(contacts->contact(i).collision2().c_str(), MID_GRIPPER) == 0) )) ||
-		    	    (collisionCheck2 && (
-			 	(strcmp(contacts->contact(i).collision1().c_str(), COLLISION_POINT) == 0) ||
-			 	(strcmp(contacts->contact(i).collision1().c_str(), LEFT_GRIPPER) == 0) ||
-			 	(strcmp(contacts->contact(i).collision1().c_str(), RIGHT_GRIPPER) == 0) ||
-			 	(strcmp(contacts->contact(i).collision1().c_str(), MID_GRIPPER) == 0) ))) {
+#if TASK1
+			rewardHistory = REWARD_WIN * REWARD_MULT + 
+							(maxEpisodeLength - episodeFrames) * REWARD_FRAMES;
+			newReward  = true;
+			endEpisode = true;
+			return;
+
+#else
+			if (( collisionCheck1 && hasGripperHit(contacts->contact(i).collision2()) ) ||
+		    	    ( collisionCheck2 && hasGripperHit(contacts->contact(i).collision1()) )) {
 					// give a big reward, also favors early frame
 					rewardHistory = REWARD_WIN * REWARD_MULT + 
 							(maxEpisodeLength - episodeFrames) * REWARD_FRAMES;
@@ -297,6 +311,7 @@ void ArmPlugin::onCollisionMsg(ConstContactsPtr &contacts)
 				endEpisode = true;
 				// not to return as there might be some contact with grippers
 			}
+#endif
 		}
 	}
 }
@@ -341,11 +356,10 @@ bool ArmPlugin::updateAgent()
 
 		
 	/*
-	/ TODO - Increase or decrease the joint velocity based on whether the action is even or odd
-	/
+	/* Increase or decrease the joint velocity based on whether the action is even or odd
 	*/
 	
-	float velocity = vel[action/2] 
+	float velocity = vel[action/2];
 	if (action % 2) 
 	   velocity -= actionVelDelta; 
 	else
@@ -375,12 +389,10 @@ bool ArmPlugin::updateAgent()
 		}
 	}
 #else
-	
 	/*
-	/ TODO - Increase or decrease the joint position based on whether the action is even or odd
-	/
+	/* Increase or decrease the joint position based on whether the action is even or odd
 	*/
-	float joint = ref[action/2]; // TODO - Set joint position based on whether action is even or odd.
+	float joint = ref[action/2]; // Set joint position based on whether action is even or odd.
 	if (action % 2) 
 	   joint -= actionJointDelta; 
 	else
@@ -604,8 +616,8 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 		const float groundContact = 0.02f;
 		
 		/*
-		/ TODO - set appropriate Reward for robot hitting the ground.
-		/
+		/* set appropriate Reward for robot hitting the ground.
+		/*
 		*/
 		bool checkGroundContact = false;
 		if (gripBBox.min.z < groundContact)
@@ -614,16 +626,16 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 		if (checkGroundContact)
 		{
 						
-			/*if(DEBUG)*/{printf("GROUND CONTACT, EOE\n");}
-
+			if(DEBUG)  {printf("GROUND CONTACT, EOE\n");}
+			// give a bigger penalty for hitting ground
 			rewardHistory = REWARD_LOSS * REWARD_GRND;
 			newReward     = true;
 			endEpisode    = true;
 		}
 		
 		/*
-		/ TODO - Issue an interim reward based on the distance to the object
-		/
+		/*  Issue an interim reward based on the distance to the object
+		/*
 		*/ 
 		
 		if (!checkGroundContact)
@@ -631,7 +643,6 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 		        const float distGoal = BoxDistance(gripBBox, propBBox); // compute the reward from distance to the goal
 			if (DEBUG) {printf("distance('%s', '%s') = %f\n", gripper->GetName().c_str(), prop->model->GetName().c_str(), distGoal);}
 
-			
 			if( episodeFrames > 1 )
 			{
 				const float distDelta  = lastGoalDistance - distGoal;
@@ -639,12 +650,13 @@ void ArmPlugin::OnUpdate(const common::UpdateInfo& updateInfo)
 				// compute the smoothed moving average of the delta of the distance to the goal
 				avgGoalDelta  = (avgGoalDelta * ALPHA) + distDelta * (1.0f - ALPHA);
 				if (distDelta > 0)
-					rewardHistory = distDelta * REWARD_WIN;
+					rewardHistory = REWARD_WIN * distDelta; // award prop. to delta movement
 				else if (distDelta < 0)
-					rewardHistory = distGoal * REWARD_LOSS;
-
+					rewardHistory = REWARD_LOSS * distGoal; // penalize prop. to distance from goal
+				else
+					rewardHistory = 0;
 					
-				newReward     = true;	
+				newReward = true;	
 				//if ((++dbgCount % 3) == 0)
 				//    printf("avg:%f, delta:%f, dist:%f, reward:%f\n", avgGoalDelta, distDelta, distGoal, rewardHistory);
 			}
